@@ -1,20 +1,19 @@
 use std::{
     thread::{JoinHandle, self},
-    sync::{mpsc, Mutex, Arc}
+    sync::mpsc
 };
 
 pub struct ThreadPool {
     workers: Vec<Worker>,
-    sender: Option<mpsc::Sender<Job>>
+    round: usize,
 }
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
 impl Drop for ThreadPool {
     fn drop(&mut self) {
-        drop(self.sender.take());
-
         for worker in &mut self.workers {
+            drop(worker.sender.take());
             if let Some(thread) = worker.thread.take() {
                 thread.join().unwrap();
             }
@@ -34,42 +33,45 @@ impl ThreadPool {
         assert!(size>0);
 
         let mut workers  = Vec::with_capacity(size);
-        let (sender, receiver) = mpsc::channel();
-
-        let receiver: Arc<Mutex<mpsc::Receiver<Job>>> = Arc::new(Mutex::new(receiver));
-
         for id in 0..size {
-            workers.push(Worker::new(id, Arc::clone(&receiver)));
+            workers.push(Worker::new(id));
         }
 
-        ThreadPool {
+        ThreadPool { 
             workers,
-            sender: Some(sender), 
+            round: 0,
         }
     }
 
     
-    pub fn execute<F>(&self, f: F)
+    pub fn execute<F>(&mut self, f: F)
     where 
         F: FnOnce() + Send + 'static,
     {
         let job = Box::new(f);
+        self.workers.get(self.round).unwrap().sender.as_ref().unwrap().send(job).unwrap();
+        let mut next_round: usize = self.round + 1;
 
-        self.sender.as_ref().unwrap().send(job).unwrap();
+        if next_round >= self.workers.len() {
+            next_round = 0;
+        }
+        self.round = next_round;
     }
 
 }
 
-type WorkerReceiver = Arc<Mutex<mpsc::Receiver<Job>>>;
 struct Worker {
     id: usize,
-    thread: Option<JoinHandle<()>>
+    thread: Option<JoinHandle<()>>,
+    sender: Option<mpsc::Sender<Job>>
 }
 
 impl Worker {
-    fn new(id: usize, receiver: WorkerReceiver) -> Worker {
+    fn new(id: usize) -> Worker {
+        let (sender, receiver) = mpsc::channel::<Job>(); 
+        
         let thread = thread::spawn(move || loop {
-            let message = receiver.lock().unwrap().recv();
+            let message = receiver.recv();
 
             match message {
                 Ok(job) => {
@@ -85,7 +87,8 @@ impl Worker {
 
         Worker {
             id,
-            thread:     Some(thread)
+            thread:     Some(thread),
+            sender: Some(sender)
         }
     }
 }
