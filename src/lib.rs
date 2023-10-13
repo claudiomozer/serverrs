@@ -87,7 +87,7 @@ impl Worker {
 
         Worker {
             id,
-            thread:     Some(thread),
+            thread: Some(thread),
             sender: Some(sender)
         }
     }
