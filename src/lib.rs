@@ -1,14 +1,26 @@
 use std::{
-    thread::{Thread, JoinHandle, self},
+    thread::{JoinHandle, self},
     sync::{mpsc, Mutex, Arc}
 };
 
 pub struct ThreadPool {
     workers: Vec<Worker>,
-    sender: mpsc::Sender<Job>
+    sender: Option<mpsc::Sender<Job>>
 }
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
+
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        drop(self.sender.take());
+
+        for worker in &mut self.workers {
+            if let Some(thread) = worker.thread.take() {
+                thread.join().unwrap();
+            }
+        }
+    } 
+}
 
 impl ThreadPool {
     /// Cria uma nova ThreadPool
@@ -30,7 +42,10 @@ impl ThreadPool {
             workers.push(Worker::new(id, Arc::clone(&receiver)));
         }
 
-        ThreadPool { workers, sender }
+        ThreadPool {
+            workers,
+            sender: Some(sender), 
+        }
     }
 
     
@@ -40,7 +55,7 @@ impl ThreadPool {
     {
         let job = Box::new(f);
 
-        self.sender.send(job).unwrap();
+        self.sender.as_ref().unwrap().send(job).unwrap();
     }
 
 }
@@ -48,22 +63,29 @@ impl ThreadPool {
 type WorkerReceiver = Arc<Mutex<mpsc::Receiver<Job>>>;
 struct Worker {
     id: usize,
-    thread: JoinHandle<()>
+    thread: Option<JoinHandle<()>>
 }
 
 impl Worker {
     fn new(id: usize, receiver: WorkerReceiver) -> Worker {
-        let thread = thread::spawn(move || { 
-            while let Ok(job) = receiver.lock().unwrap().recv() {
-                println!("Worker {}, executing the job", id);
-                
-                job();
+        let thread = thread::spawn(move || loop {
+            let message = receiver.lock().unwrap().recv();
+
+            match message {
+                Ok(job) => {
+                    println!("Worker {}, executing the job", id);
+                    job();
+                },
+                Err(_) => {
+                    println!("Worker {} shutting down", id);
+                    break;
+                }
             }
         }); 
 
         Worker {
             id,
-            thread
+            thread:     Some(thread)
         }
     }
 }
